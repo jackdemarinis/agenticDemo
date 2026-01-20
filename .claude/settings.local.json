@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm create:*)",
+      "Bash(npm install:*)",
+      "Bash(npx tailwindcss init -p)",
+      "Bash(npx.cmd tailwindcss:*)",
+      "Bash($env:Path += \";$env:USERPROFILE\\\\.cargo\\\\bin;C:\\\\Users\\\\jackf\\\\AppData\\\\Local\\\\puccinialin\\\\puccinialin\\\\Cache\\\\rustup\\\\toolchains\\\\stable-x86_64-pc-windows-msvc\\\\bin\")",
+      "Bash(cargo:*)",
+      "Bash(python.exe -m pip install:*)",
+      "Bash(python -m pip install:*)",
+      "Bash(python:*)"
+    ]
+  }
+}
