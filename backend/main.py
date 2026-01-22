@@ -4,12 +4,14 @@ import uuid
 import csv
 import io
 from typing import List
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Response
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Response, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
+import secrets
 
 import database
 from database import get_db, GoogleAuth, Run, Recipient
@@ -26,6 +28,10 @@ from google_auth import (
 from agent import generate_draft_for_recipient
 
 load_dotenv()
+
+# Simple session storage (in production, use Redis or a database)
+active_sessions = {}
+SESSION_EXPIRY = timedelta(hours=24)
 
 
 @asynccontextmanager
@@ -45,6 +51,65 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ============================================================================
+# AUTHENTICATION
+# ============================================================================
+
+def verify_session(authorization: str = Header(None)):
+    """Verify session token."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="No authorization header")
+
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization format")
+
+    token = authorization.replace("Bearer ", "")
+
+    if token not in active_sessions:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    session_data = active_sessions[token]
+    if datetime.now() > session_data["expires_at"]:
+        del active_sessions[token]
+        raise HTTPException(status_code=401, detail="Session expired")
+
+    return session_data
+
+
+@app.post("/api/auth/login")
+def login(credentials: dict):
+    """Authenticate with password."""
+    password = credentials.get("password")
+    app_password = os.getenv("APP_PASSWORD", "DraftSmith2024!")
+
+    if password != app_password:
+        raise HTTPException(status_code=401, detail="Invalid password")
+
+    # Create session token
+    token = secrets.token_urlsafe(32)
+    active_sessions[token] = {
+        "created_at": datetime.now(),
+        "expires_at": datetime.now() + SESSION_EXPIRY
+    }
+
+    return {"token": token, "expires_in": int(SESSION_EXPIRY.total_seconds())}
+
+
+@app.post("/api/auth/logout")
+def logout(session = Depends(verify_session), authorization: str = Header(None)):
+    """Logout and invalidate session."""
+    token = authorization.replace("Bearer ", "")
+    if token in active_sessions:
+        del active_sessions[token]
+    return {"success": True}
+
+
+@app.get("/api/auth/verify")
+def verify_auth(session = Depends(verify_session)):
+    """Verify if session is valid."""
+    return {"authenticated": True}
 
 
 # ============================================================================
@@ -92,7 +157,7 @@ def google_callback(code: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/auth/status")
-def auth_status(db: Session = Depends(get_db)) -> GoogleAuthResponse:
+def auth_status(db: Session = Depends(get_db), session = Depends(verify_session)) -> GoogleAuthResponse:
     """Check if user is authenticated with Gmail."""
     # Get the most recent auth (simple single-user approach for demo)
     auth = db.query(GoogleAuth).order_by(GoogleAuth.updated_at.desc()).first()
@@ -120,7 +185,7 @@ def google_disconnect(db: Session = Depends(get_db)):
 # ============================================================================
 
 @app.post("/api/recipients/parse-csv")
-async def parse_csv(file: UploadFile = File(...)) -> CSVParseResponse:
+async def parse_csv(file: UploadFile = File(...), session = Depends(verify_session)) -> CSVParseResponse:
     """Parse CSV file and return preview with validation."""
     try:
         contents = await file.read()
@@ -211,7 +276,7 @@ async def parse_csv(file: UploadFile = File(...)) -> CSVParseResponse:
 # ============================================================================
 
 @app.post("/api/run")
-def create_run(run_data: RunCreate, db: Session = Depends(get_db)) -> dict:
+def create_run(run_data: RunCreate, db: Session = Depends(get_db), session = Depends(verify_session)) -> dict:
     """Create a new campaign run."""
     # Check auth
     auth = db.query(GoogleAuth).order_by(GoogleAuth.updated_at.desc()).first()
@@ -258,7 +323,7 @@ def create_run(run_data: RunCreate, db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/api/run/{run_id}/generate")
-def generate_drafts(run_id: str, db: Session = Depends(get_db)):
+def generate_drafts(run_id: str, db: Session = Depends(get_db), session = Depends(verify_session)):
     """Generate drafts for all recipients in a run."""
     # Get run
     run = db.query(Run).filter(Run.id == run_id).first()
@@ -347,7 +412,7 @@ def generate_drafts(run_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/run/{run_id}")
-def get_run(run_id: str, db: Session = Depends(get_db)) -> RunResponse:
+def get_run(run_id: str, db: Session = Depends(get_db), session = Depends(verify_session)) -> RunResponse:
     """Get run details with all recipients."""
     run = db.query(Run).filter(Run.id == run_id).first()
     if not run:

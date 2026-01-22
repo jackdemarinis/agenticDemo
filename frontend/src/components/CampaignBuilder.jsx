@@ -2,7 +2,7 @@ import { useState } from 'react'
 
 const API_BASE = 'http://localhost:8000'
 
-function CampaignBuilder({ authStatus, onRunCreated, onAuthStatusChange }) {
+function CampaignBuilder({ authStatus, authToken, onRunCreated, onAuthStatusChange }) {
   const [pitch, setPitch] = useState('')
   const [signOff, setSignOff] = useState('')
   const [audienceType, setAudienceType] = useState('mixed')
@@ -50,6 +50,7 @@ function CampaignBuilder({ authStatus, onRunCreated, onAuthStatusChange }) {
     try {
       const response = await fetch(`${API_BASE}/api/recipients/parse-csv`, {
         method: 'POST',
+        headers: { 'Authorization': `Bearer ${authToken}` },
         body: formData
       })
 
@@ -84,7 +85,10 @@ function CampaignBuilder({ authStatus, onRunCreated, onAuthStatusChange }) {
       // Create run
       const runResponse = await fetch(`${API_BASE}/api/run`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${authToken}`
+        },
         body: JSON.stringify({
           pitch,
           sign_off: signOff,
@@ -104,7 +108,8 @@ function CampaignBuilder({ authStatus, onRunCreated, onAuthStatusChange }) {
 
       // Start generation
       const generateResponse = await fetch(`${API_BASE}/api/run/${runData.run_id}/generate`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${authToken}` }
       })
 
       if (!generateResponse.ok) throw new Error('Failed to generate drafts')

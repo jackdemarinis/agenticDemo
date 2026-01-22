@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 
 const API_BASE = 'http://localhost:8000'
 
-function ResultsPage({ runId, onBack }) {
+function ResultsPage({ runId, authToken, onBack }) {
   const [runData, setRunData] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [selectedDraft, setSelectedDraft] = useState(null)
@@ -12,7 +12,9 @@ function ResultsPage({ runId, onBack }) {
 
     const fetchRunData = async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/run/${runId}`)
+        const response = await fetch(`${API_BASE}/api/run/${runId}`, {
+          headers: { 'Authorization': `Bearer ${authToken}` }
+        })
         const data = await response.json()
         setRunData(data)
         setIsLoading(false)
@@ -28,7 +30,7 @@ function ResultsPage({ runId, onBack }) {
     }
 
     fetchRunData()
-  }, [runId])
+  }, [runId, authToken])
 
   const getStatusColor = (status) => {
     switch (status) {
