@@ -116,6 +116,20 @@ def verify_auth(session = Depends(verify_session)):
 # HEALTH CHECK
 # ============================================================================
 
+@app.get("/")
+def root():
+    """Root endpoint for Railway deployment."""
+    return {
+        "service": "DraftSmith API",
+        "status": "running",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/api/health",
+            "docs": "/docs",
+            "auth": "/api/auth/login"
+        }
+    }
+
 @app.get("/api/health")
 def health_check():
     """Health check endpoint."""
