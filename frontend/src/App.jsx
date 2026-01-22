@@ -3,7 +3,7 @@ import CampaignBuilder from './components/CampaignBuilder'
 import ResultsPage from './components/ResultsPage'
 import Login from './components/Login'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
