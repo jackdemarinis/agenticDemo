@@ -10,7 +10,8 @@
       "Bash(python.exe -m pip install:*)",
       "Bash(python -m pip install:*)",
       "Bash(python:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
