@@ -9,7 +9,8 @@
       "Bash(cargo:*)",
       "Bash(python.exe -m pip install:*)",
       "Bash(python -m pip install:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(git add:*)"
     ]
   }
 }
