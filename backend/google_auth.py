@@ -36,15 +36,32 @@ def get_oauth_flow():
     return flow
 
 
-def get_authorization_url():
-    """Get the authorization URL for OAuth."""
+def get_authorization_url(session_token: str = None):
+    """Get the authorization URL for OAuth.
+
+    Args:
+        session_token: The user's session token to associate with the OAuth credentials
+    """
     flow = get_oauth_flow()
-    authorization_url, state = flow.authorization_url(
+    # Embed session token in state parameter for retrieval in callback
+    state_data = {"session_token": session_token} if session_token else {}
+    state = base64.urlsafe_b64encode(json.dumps(state_data).encode()).decode()
+
+    authorization_url, _ = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
-        prompt='consent'
+        prompt='consent',
+        state=state
     )
     return authorization_url, state
+
+
+def parse_oauth_state(state: str) -> dict:
+    """Parse the state parameter from OAuth callback."""
+    try:
+        return json.loads(base64.urlsafe_b64decode(state.encode()).decode())
+    except Exception:
+        return {}
 
 
 def exchange_code_for_token(code: str):
@@ -55,13 +72,21 @@ def exchange_code_for_token(code: str):
     return credentials
 
 
-def save_credentials(db: Session, credentials: Credentials, email: str):
-    """Save credentials to database."""
-    # Check if auth already exists
-    auth = db.query(GoogleAuth).filter(GoogleAuth.email == email).first()
+def save_credentials(db: Session, credentials: Credentials, email: str, session_token: str):
+    """Save credentials to database linked to a session.
+
+    Args:
+        db: Database session
+        credentials: Google OAuth credentials
+        email: User's Gmail email address
+        session_token: The session token to associate with these credentials
+    """
+    # Check if auth already exists for this session
+    auth = db.query(GoogleAuth).filter(GoogleAuth.session_token == session_token).first()
 
     if auth:
-        # Update existing
+        # Update existing session's credentials
+        auth.email = email
         auth.access_token = credentials.token
         auth.refresh_token = credentials.refresh_token
         auth.token_uri = credentials.token_uri
@@ -71,8 +96,9 @@ def save_credentials(db: Session, credentials: Credentials, email: str):
         auth.expiry = credentials.expiry
         auth.updated_at = datetime.utcnow()
     else:
-        # Create new
+        # Create new credentials for this session
         auth = GoogleAuth(
+            session_token=session_token,
             email=email,
             access_token=credentials.token,
             refresh_token=credentials.refresh_token,
@@ -144,9 +170,9 @@ def create_gmail_draft(credentials: Credentials, to_email: str, subject: str, bo
     return draft['id']
 
 
-def delete_credentials(db: Session, email: str):
-    """Delete stored credentials."""
-    auth = db.query(GoogleAuth).filter(GoogleAuth.email == email).first()
+def delete_credentials_by_session(db: Session, session_token: str):
+    """Delete stored credentials for a session."""
+    auth = db.query(GoogleAuth).filter(GoogleAuth.session_token == session_token).first()
     if auth:
         db.delete(auth)
         db.commit()

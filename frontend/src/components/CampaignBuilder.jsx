@@ -19,7 +19,12 @@ function CampaignBuilder({ authStatus, authToken, onRunCreated, onAuthStatusChan
 
   const handleGoogleLogin = async () => {
     try {
-      const response = await fetch(`${API_BASE}/auth/google/login`)
+      const response = await fetch(`${API_BASE}/auth/google/login`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      })
+      if (!response.ok) {
+        throw new Error('Failed to initiate Google login')
+      }
       const data = await response.json()
       window.location.href = data.auth_url
     } catch (error) {

@@ -89,7 +89,10 @@ function App() {
 
   const handleDisconnect = async () => {
     try {
-      await fetch(`${API_BASE}/api/auth/google/disconnect`, { method: 'POST' })
+      await fetch(`${API_BASE}/api/auth/google/disconnect`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      })
       setAuthStatus({ connected: false, email: null })
     } catch (error) {
       console.error('Error disconnecting:', error)

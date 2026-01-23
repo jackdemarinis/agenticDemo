@@ -25,7 +25,7 @@ from google_auth import (
     get_authorization_url, exchange_code_for_token,
     save_credentials, get_user_email_from_token,
     get_credentials_from_db, create_gmail_draft,
-    delete_credentials
+    delete_credentials_by_session, parse_oauth_state
 )
 from agent import generate_draft_for_recipient
 
@@ -100,11 +100,13 @@ def login(credentials: dict):
 
 
 @app.post("/api/auth/logout")
-def logout(session = Depends(verify_session), authorization: str = Header(None)):
+def logout(session = Depends(verify_session), authorization: str = Header(None), db: Session = Depends(get_db)):
     """Logout and invalidate session."""
     token = authorization.replace("Bearer ", "")
     if token in active_sessions:
         del active_sessions[token]
+    # Also clean up any Gmail credentials for this session
+    delete_credentials_by_session(db, token)
     return {"success": True}
 
 
@@ -143,24 +145,41 @@ def health_check():
 # ============================================================================
 
 @app.get("/auth/google/login")
-def google_login():
-    """Initiate Google OAuth flow."""
-    auth_url, state = get_authorization_url()
+def google_login(authorization: str = Header(None)):
+    """Initiate Google OAuth flow.
+
+    Requires session token to associate Gmail credentials with the current session.
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization required")
+
+    session_token = authorization.replace("Bearer ", "")
+    if session_token not in active_sessions:
+        raise HTTPException(status_code=401, detail="Invalid session")
+
+    auth_url, state = get_authorization_url(session_token)
     return {"auth_url": auth_url, "state": state}
 
 
 @app.get("/auth/google/callback")
-def google_callback(code: str, db: Session = Depends(get_db)):
+def google_callback(code: str, state: str = None, db: Session = Depends(get_db)):
     """Handle Google OAuth callback."""
     try:
+        # Parse state to get session token
+        state_data = parse_oauth_state(state) if state else {}
+        session_token = state_data.get("session_token")
+
+        if not session_token or session_token not in active_sessions:
+            raise Exception("Invalid or expired session")
+
         # Exchange code for credentials
         credentials = exchange_code_for_token(code)
 
         # Get user email
         email = get_user_email_from_token(credentials)
 
-        # Save credentials
-        save_credentials(db, credentials, email)
+        # Save credentials linked to this session
+        save_credentials(db, credentials, email, session_token)
 
         # Redirect to frontend with success
         frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
@@ -173,10 +192,13 @@ def google_callback(code: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/auth/status")
-def auth_status(db: Session = Depends(get_db), session = Depends(verify_session)) -> GoogleAuthResponse:
-    """Check if user is authenticated with Gmail."""
-    # Get the most recent auth (simple single-user approach for demo)
-    auth = db.query(GoogleAuth).order_by(GoogleAuth.updated_at.desc()).first()
+def auth_status(db: Session = Depends(get_db), session = Depends(verify_session), authorization: str = Header(None)) -> GoogleAuthResponse:
+    """Check if user is authenticated with Gmail for their current session."""
+    # Get session token from authorization header
+    session_token = authorization.replace("Bearer ", "") if authorization else None
+
+    # Get auth for this specific session
+    auth = db.query(GoogleAuth).filter(GoogleAuth.session_token == session_token).first()
 
     if auth:
         return GoogleAuthResponse(connected=True, email=auth.email)
@@ -185,13 +207,13 @@ def auth_status(db: Session = Depends(get_db), session = Depends(verify_session)
 
 
 @app.post("/api/auth/google/disconnect")
-def google_disconnect(db: Session = Depends(get_db)):
-    """Disconnect Google account."""
-    # Get the most recent auth
-    auth = db.query(GoogleAuth).order_by(GoogleAuth.updated_at.desc()).first()
+def google_disconnect(db: Session = Depends(get_db), session = Depends(verify_session), authorization: str = Header(None)):
+    """Disconnect Google account for the current session."""
+    # Get session token from authorization header
+    session_token = authorization.replace("Bearer ", "") if authorization else None
 
-    if auth:
-        delete_credentials(db, auth.email)
+    if session_token:
+        delete_credentials_by_session(db, session_token)
 
     return {"success": True, "message": "Disconnected from Gmail"}
 
@@ -292,10 +314,13 @@ async def parse_csv(file: UploadFile = File(...), session = Depends(verify_sessi
 # ============================================================================
 
 @app.post("/api/run")
-def create_run(run_data: RunCreate, db: Session = Depends(get_db), session = Depends(verify_session)) -> dict:
+def create_run(run_data: RunCreate, db: Session = Depends(get_db), session = Depends(verify_session), authorization: str = Header(None)) -> dict:
     """Create a new campaign run."""
-    # Check auth
-    auth = db.query(GoogleAuth).order_by(GoogleAuth.updated_at.desc()).first()
+    # Get session token from authorization header
+    session_token = authorization.replace("Bearer ", "") if authorization else None
+
+    # Check auth for this session
+    auth = db.query(GoogleAuth).filter(GoogleAuth.session_token == session_token).first()
     if not auth:
         raise HTTPException(status_code=401, detail="Gmail not connected")
 

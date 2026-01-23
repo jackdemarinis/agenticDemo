@@ -21,11 +21,12 @@ Base = declarative_base()
 
 
 class GoogleAuth(Base):
-    """Store Google OAuth tokens."""
+    """Store Google OAuth tokens per session."""
     __tablename__ = "google_auth"
 
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True)
+    session_token = Column(String, unique=True, index=True)  # Link to user session
+    email = Column(String, index=True)  # No longer unique - same email can be linked to different sessions
     access_token = Column(Text)
     refresh_token = Column(Text)
     token_uri = Column(String)
