@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -13,6 +13,9 @@ function CampaignBuilder({ authStatus, authToken, onRunCreated, onAuthStatusChan
   const [csvPreview, setCsvPreview] = useState(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [progress, setProgress] = useState(null)
+  const [currentRunId, setCurrentRunId] = useState(null)
+  const progressInterval = useRef(null)
 
   const handleGoogleLogin = async () => {
     try {
@@ -77,9 +80,41 @@ function CampaignBuilder({ authStatus, authToken, onRunCreated, onAuthStatusChan
     }
   }
 
+  // Cleanup progress polling on unmount
+  useEffect(() => {
+    return () => {
+      if (progressInterval.current) {
+        clearInterval(progressInterval.current)
+      }
+    }
+  }, [])
+
+  const pollProgress = async (runId) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/run/${runId}/progress`, {
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      })
+      if (response.ok) {
+        const data = await response.json()
+        setProgress(data)
+
+        // Stop polling when complete
+        if (data.run_status === 'completed' || data.run_status === 'failed') {
+          if (progressInterval.current) {
+            clearInterval(progressInterval.current)
+            progressInterval.current = null
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error polling progress:', error)
+    }
+  }
+
   const handleGenerateDrafts = async () => {
     setError(null)
     setIsLoading(true)
+    setProgress(null)
 
     try {
       // Create run
@@ -105,20 +140,48 @@ function CampaignBuilder({ authStatus, authToken, onRunCreated, onAuthStatusChan
       }
 
       const runData = await runResponse.json()
+      setCurrentRunId(runData.run_id)
 
-      // Start generation
+      // Initialize progress
+      const totalRecipients = recipients.filter(r => r.email).length
+      setProgress({
+        total: totalRecipients,
+        completed: 0,
+        processing: 0,
+        queued: totalRecipients,
+        drafted: 0,
+        failed: 0,
+        progress_percent: 0,
+        run_status: 'processing'
+      })
+
+      // Start polling for progress
+      progressInterval.current = setInterval(() => pollProgress(runData.run_id), 1000)
+
+      // Start generation (this will return when complete)
       const generateResponse = await fetch(`${API_BASE}/api/run/${runData.run_id}/generate`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${authToken}` }
       })
+
+      // Stop polling
+      if (progressInterval.current) {
+        clearInterval(progressInterval.current)
+        progressInterval.current = null
+      }
 
       if (!generateResponse.ok) throw new Error('Failed to generate drafts')
 
       onRunCreated(runData.run_id)
     } catch (error) {
       setError(error.message)
+      if (progressInterval.current) {
+        clearInterval(progressInterval.current)
+        progressInterval.current = null
+      }
     } finally {
       setIsLoading(false)
+      setProgress(null)
     }
   }
 
@@ -341,6 +404,76 @@ function CampaignBuilder({ authStatus, authToken, onRunCreated, onAuthStatusChan
           {isLoading ? 'Generating Drafts...' : 'Generate Drafts'}
         </button>
       </div>
+
+      {/* Progress Modal */}
+      {isLoading && progress && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
+            <div className="text-center">
+              {/* Spinning loader */}
+              <div className="relative w-20 h-20 mx-auto mb-4">
+                <svg className="animate-spin w-20 h-20" viewBox="0 0 24 24">
+                  <circle
+                    className="opacity-25"
+                    cx="12"
+                    cy="12"
+                    r="10"
+                    stroke="currentColor"
+                    strokeWidth="4"
+                    fill="none"
+                  />
+                  <path
+                    className="opacity-75 text-blue-600"
+                    fill="currentColor"
+                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="text-lg font-bold text-gray-700">{progress.progress_percent}%</span>
+                </div>
+              </div>
+
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+                Generating Drafts
+              </h3>
+
+              {/* Progress bar */}
+              <div className="w-full bg-gray-200 rounded-full h-3 mb-4">
+                <div
+                  className="bg-blue-600 h-3 rounded-full transition-all duration-500 ease-out"
+                  style={{ width: `${progress.progress_percent}%` }}
+                />
+              </div>
+
+              {/* Progress stats */}
+              <div className="grid grid-cols-3 gap-2 text-sm mb-4">
+                <div className="bg-gray-50 rounded-lg p-2">
+                  <p className="text-gray-500">Total</p>
+                  <p className="font-semibold text-gray-900">{progress.total}</p>
+                </div>
+                <div className="bg-green-50 rounded-lg p-2">
+                  <p className="text-green-600">Completed</p>
+                  <p className="font-semibold text-green-900">{progress.drafted}</p>
+                </div>
+                <div className="bg-blue-50 rounded-lg p-2">
+                  <p className="text-blue-600">Processing</p>
+                  <p className="font-semibold text-blue-900">{progress.processing + progress.queued}</p>
+                </div>
+              </div>
+
+              <p className="text-sm text-gray-500">
+                {progress.completed} of {progress.total} recipients processed
+              </p>
+
+              {progress.failed > 0 && (
+                <p className="text-sm text-red-500 mt-1">
+                  {progress.failed} failed
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

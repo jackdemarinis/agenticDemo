@@ -5,6 +5,7 @@ import csv
 import io
 from typing import List
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Response, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -12,9 +13,10 @@ from sqlalchemy.orm import Session
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 import secrets
+import threading
 
 import database
-from database import get_db, GoogleAuth, Run, Recipient
+from database import get_db, GoogleAuth, Run, Recipient, SessionLocal
 from models import (
     RunCreate, RunResponse, RecipientResponse,
     GoogleAuthResponse, CSVParseResponse, RecipientInput
@@ -336,9 +338,84 @@ def create_run(run_data: RunCreate, db: Session = Depends(get_db), session = Dep
     return {"run_id": run_id, "status": "created"}
 
 
+def process_single_recipient(
+    recipient_id: int,
+    recipient_data: dict,
+    run_pitch: str,
+    run_audience_type: str,
+    run_tone: str,
+    run_personalization_level: str,
+    run_sign_off: str,
+    user_email: str
+):
+    """Process a single recipient in a thread-safe manner."""
+    from database import SessionLocal
+    from google_auth import get_credentials_from_db, create_gmail_draft
+
+    # Create a new database session for this thread
+    db = SessionLocal()
+    try:
+        # Get recipient from DB
+        recipient = db.query(Recipient).filter(Recipient.id == recipient_id).first()
+        if not recipient:
+            return {"error": "Recipient not found", "recipient_id": recipient_id}
+
+        # Update status to processing
+        recipient.status = "processing"
+        db.commit()
+
+        # Generate draft using agent
+        draft_data = generate_draft_for_recipient(
+            recipient_data,
+            run_pitch,
+            run_audience_type,
+            run_tone,
+            run_personalization_level,
+            run_sign_off
+        )
+
+        # Update recipient with draft data
+        recipient.inferred_outreach_mode = draft_data["inferred_outreach_mode"]
+        recipient.research_summary = draft_data.get("research_summary")
+        recipient.research_confidence = draft_data.get("research_confidence")
+        recipient.subject = draft_data["subject"]
+        recipient.body = draft_data["body"]
+        recipient.rationale = draft_data["rationale"]
+        recipient.used_personalization_level = draft_data["used_personalization_level"]
+        recipient.status = "drafted"
+
+        # Get credentials and create Gmail draft
+        credentials = get_credentials_from_db(db, user_email)
+        if credentials:
+            draft_id = create_gmail_draft(
+                credentials,
+                recipient.email,
+                recipient.subject,
+                recipient.body
+            )
+            recipient.draft_id = draft_id
+
+        db.commit()
+        return {"success": True, "recipient_id": recipient_id, "email": recipient.email}
+
+    except Exception as e:
+        print(f"Error processing recipient {recipient_id}: {e}")
+        try:
+            recipient = db.query(Recipient).filter(Recipient.id == recipient_id).first()
+            if recipient:
+                recipient.status = "failed"
+                recipient.rationale = f"Error: {str(e)}"
+                db.commit()
+        except:
+            pass
+        return {"error": str(e), "recipient_id": recipient_id}
+    finally:
+        db.close()
+
+
 @app.post("/api/run/{run_id}/generate")
 def generate_drafts(run_id: str, db: Session = Depends(get_db), session = Depends(verify_session)):
-    """Generate drafts for all recipients in a run."""
+    """Generate drafts for all recipients in a run using parallel processing."""
     # Get run
     run = db.query(Run).filter(Run.id == run_id).first()
     if not run:
@@ -350,7 +427,6 @@ def generate_drafts(run_id: str, db: Session = Depends(get_db), session = Depend
         raise HTTPException(status_code=401, detail="Gmail not connected")
 
     # Get credentials
-    from google_auth import get_credentials_from_db
     credentials = get_credentials_from_db(db, run.user_email)
     if not credentials:
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -362,67 +438,94 @@ def generate_drafts(run_id: str, db: Session = Depends(get_db), session = Depend
     # Get recipients
     recipients = db.query(Recipient).filter(Recipient.run_id == run_id).all()
 
-    # Process each recipient
+    # Store run config for parallel processing
+    run_config = {
+        "pitch": run.pitch,
+        "audience_type": run.audience_type,
+        "tone": run.tone,
+        "personalization_level": run.personalization_level,
+        "sign_off": run.sign_off,
+        "user_email": run.user_email
+    }
+
+    # Prepare recipient data for parallel processing
+    recipient_tasks = []
     for recipient in recipients:
-        try:
-            # Prepare recipient data
-            recipient_data = {
-                "email": recipient.email,
-                "first_name": recipient.first_name,
-                "last_name": recipient.last_name,
-                "company": recipient.company,
-                "role": recipient.role,
-                "location": recipient.location,
-                "lead_type": recipient.lead_type,
-                "notes": recipient.notes,
-                "linkedin_url": recipient.linkedin_url,
-                "personal_website_url": recipient.personal_website_url,
-                "company_website_url": recipient.company_website_url,
-                "tags": recipient.tags
-            }
+        recipient_data = {
+            "email": recipient.email,
+            "first_name": recipient.first_name,
+            "last_name": recipient.last_name,
+            "company": recipient.company,
+            "role": recipient.role,
+            "location": recipient.location,
+            "lead_type": recipient.lead_type,
+            "notes": recipient.notes,
+            "linkedin_url": recipient.linkedin_url,
+            "personal_website_url": recipient.personal_website_url,
+            "company_website_url": recipient.company_website_url,
+            "tags": recipient.tags
+        }
+        recipient_tasks.append((recipient.id, recipient_data))
 
-            # Generate draft using agent
-            draft_data = generate_draft_for_recipient(
+    # Process recipients in parallel (limit to 5 concurrent to avoid rate limits)
+    max_workers = min(5, len(recipient_tasks))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                process_single_recipient,
+                recipient_id,
                 recipient_data,
-                run.pitch,
-                run.audience_type,
-                run.tone,
-                run.personalization_level,
-                run.sign_off
-            )
+                run_config["pitch"],
+                run_config["audience_type"],
+                run_config["tone"],
+                run_config["personalization_level"],
+                run_config["sign_off"],
+                run_config["user_email"]
+            ): recipient_id
+            for recipient_id, recipient_data in recipient_tasks
+        }
 
-            # Update recipient with draft data
-            recipient.inferred_outreach_mode = draft_data["inferred_outreach_mode"]
-            recipient.research_summary = draft_data.get("research_summary")
-            recipient.research_confidence = draft_data.get("research_confidence")
-            recipient.subject = draft_data["subject"]
-            recipient.body = draft_data["body"]
-            recipient.rationale = draft_data["rationale"]
-            recipient.used_personalization_level = draft_data["used_personalization_level"]
-            recipient.status = "drafted"
-
-            # Create Gmail draft
-            draft_id = create_gmail_draft(
-                credentials,
-                recipient.email,
-                recipient.subject,
-                recipient.body
-            )
-            recipient.draft_id = draft_id
-
-            db.commit()
-
-        except Exception as e:
-            print(f"Error processing recipient {recipient.email}: {e}")
-            recipient.status = "failed"
-            recipient.rationale = f"Error: {str(e)}"
-            db.commit()
+        # Wait for all tasks to complete
+        for future in as_completed(futures):
+            result = future.result()
+            print(f"Completed: {result}")
 
     # Update run status
+    db.refresh(run)
     run.status = "completed"
     db.commit()
 
     return {"status": "completed", "run_id": run_id}
+
+
+@app.get("/api/run/{run_id}/progress")
+def get_run_progress(run_id: str, db: Session = Depends(get_db), session = Depends(verify_session)):
+    """Get real-time progress of draft generation."""
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    recipients = db.query(Recipient).filter(Recipient.run_id == run_id).all()
+
+    total = len(recipients)
+    completed = sum(1 for r in recipients if r.status in ["drafted", "failed"])
+    processing = sum(1 for r in recipients if r.status == "processing")
+    queued = sum(1 for r in recipients if r.status == "queued")
+    drafted = sum(1 for r in recipients if r.status == "drafted")
+    failed = sum(1 for r in recipients if r.status == "failed")
+
+    return {
+        "run_id": run_id,
+        "run_status": run.status,
+        "total": total,
+        "completed": completed,
+        "processing": processing,
+        "queued": queued,
+        "drafted": drafted,
+        "failed": failed,
+        "progress_percent": round((completed / total) * 100) if total > 0 else 0
+    }
 
 
 @app.get("/api/run/{run_id}")
