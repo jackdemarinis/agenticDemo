@@ -28,6 +28,7 @@ from google_auth import (
     delete_credentials_by_session, parse_oauth_state
 )
 from agent import generate_draft_for_recipient
+import asyncio
 
 load_dotenv()
 
@@ -307,6 +308,141 @@ async def parse_csv(file: UploadFile = File(...), session = Depends(verify_sessi
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"CSV parsing error: {str(e)}")
+
+
+# ============================================================================
+# AI INPUT / LEAD DISCOVERY
+# ============================================================================
+
+# Store discovery progress in memory (for demo - use Redis in production)
+discovery_progress = {}
+
+@app.post("/api/leads/discover")
+async def discover_leads_endpoint(
+    request: dict,
+    session = Depends(verify_session)
+):
+    """
+    Start AI-powered lead discovery.
+
+    Request body:
+    {
+        "seed_input": "coffee shop" or "https://example.com",
+        "location": "Austin, TX",
+        "industry_hint": "food and beverage",  // optional
+        "max_results": 10  // optional, default 10
+    }
+    """
+    from lead_discovery import LeadDiscoveryPipeline, DiscoveryConfig
+
+    seed_input = request.get("seed_input")
+    location = request.get("location")
+    industry_hint = request.get("industry_hint")
+    max_results = request.get("max_results", 10)
+
+    if not seed_input:
+        raise HTTPException(status_code=400, detail="seed_input is required")
+    if not location:
+        raise HTTPException(status_code=400, detail="location is required")
+
+    # Create discovery ID for tracking
+    discovery_id = str(uuid.uuid4())
+
+    # Initialize progress tracking
+    discovery_progress[discovery_id] = {
+        "status": "starting",
+        "current": 0,
+        "total": max_results,
+        "message": "Initializing search...",
+        "leads": [],
+        "error": None
+    }
+
+    # Run discovery in background
+    async def run_discovery():
+        try:
+            config = DiscoveryConfig(
+                seed_input=seed_input,
+                location=location,
+                industry_hint=industry_hint,
+                max_results=max_results
+            )
+
+            pipeline = LeadDiscoveryPipeline()
+
+            async def progress_callback(current, total, message):
+                discovery_progress[discovery_id].update({
+                    "status": "processing",
+                    "current": current,
+                    "total": total,
+                    "message": message
+                })
+
+            leads = await pipeline.discover_leads(config, progress_callback)
+
+            # Convert leads to recipient format
+            recipients = pipeline.leads_to_recipients(leads)
+
+            discovery_progress[discovery_id].update({
+                "status": "completed",
+                "current": len(leads),
+                "total": len(leads),
+                "message": f"Found {len(leads)} leads",
+                "leads": recipients
+            })
+
+        except Exception as e:
+            discovery_progress[discovery_id].update({
+                "status": "failed",
+                "error": str(e),
+                "message": f"Discovery failed: {str(e)}"
+            })
+
+    # Start background task
+    asyncio.create_task(run_discovery())
+
+    return {
+        "discovery_id": discovery_id,
+        "status": "started",
+        "message": "Lead discovery started"
+    }
+
+
+@app.get("/api/leads/discover/{discovery_id}/progress")
+async def get_discovery_progress(
+    discovery_id: str,
+    session = Depends(verify_session)
+):
+    """Get progress of lead discovery."""
+    if discovery_id not in discovery_progress:
+        raise HTTPException(status_code=404, detail="Discovery not found")
+
+    return discovery_progress[discovery_id]
+
+
+@app.get("/api/leads/discover/{discovery_id}/results")
+async def get_discovery_results(
+    discovery_id: str,
+    session = Depends(verify_session)
+):
+    """Get results of completed lead discovery."""
+    if discovery_id not in discovery_progress:
+        raise HTTPException(status_code=404, detail="Discovery not found")
+
+    progress = discovery_progress[discovery_id]
+
+    if progress["status"] != "completed":
+        return {
+            "status": progress["status"],
+            "message": progress["message"],
+            "leads": []
+        }
+
+    return {
+        "status": "completed",
+        "total_leads": len(progress["leads"]),
+        "leads": progress["leads"]
+    }
 
 
 # ============================================================================
