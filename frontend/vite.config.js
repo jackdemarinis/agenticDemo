@@ -9,6 +9,6 @@ export default defineConfig({
   },
   preview: {
     host: '0.0.0.0',
-    allowedHosts: ['frontend-production-6cb1.up.railway.app', '.railway.app']
+    allowedHosts: ['frontend-production-6cb1.up.railway.app', '.railway.app', 'www.draftsmith.it.com', 'draftsmith.it.com']
   }
 })
