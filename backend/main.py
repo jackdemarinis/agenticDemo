@@ -46,12 +46,21 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="DraftSmith API", lifespan=lifespan)
 
 # CORS configuration
+# Set FRONTEND_URL env var on Railway to your production domain
+allowed_origins = [
+    os.getenv("FRONTEND_URL", "http://localhost:5173"),
+    "https://www.draftsmith.it.com",  # Production frontend
+]
+# Remove duplicates and empty strings
+allowed_origins = list(set(origin for origin in allowed_origins if origin))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:5173")],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],  # Allow frontend to read response headers
 )
 
 
